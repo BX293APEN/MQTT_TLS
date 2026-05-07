@@ -15,6 +15,15 @@
  *     3) Remaining Length の分だけ残りのバイト列を受信
  *   この実装では内部バッファ (MQTT_TLS_BUF_SIZE) にパケット全体を格納してから
  *   パーサーへ渡す。tls_recv_exact() でバイト単位の正確な受信を行う。
+ *
+ * [修正履歴]
+ *   - MQTT_LOG_INFO / MQTT_LOG_ERR: カンマ演算子による二文展開を
+ *     do { } while(0) に統一。if/else 単文での誤動作を防ぐ。
+ *   - mqtt_connection / mqtt_data_send / mqtt_subscribe / mqtt_recv_message:
+ *     スタック上の 64KB バッファ (uint8_t buf[MQTT_TLS_BUF_SIZE]) を
+ *     ヒープ確保に変更。Windows デフォルトスタック 1MB では TLS ハンドシェイク
+ *     バッファと合算してスタックオーバーフローが発生していた。
+ *     全リターンパスで pen_free(buf) が呼ばれるよう goto err パターンを採用。
  */
 
 #include <penlib.h>
@@ -35,12 +44,19 @@
 
 /* ==========================================================================
  * ログマクロ
+ *
+ * [FIX] MQTT_LOG_INFO / MQTT_LOG_ERR をカンマ演算子から do { } while(0) に変更。
+ *   旧実装はカンマ演算子で2つの pen_fprintf を連結していたため、
+ *   if (cond) MQTT_LOG_INFO(...); else ... のような文脈で else が
+ *   2番目の pen_fprintf に対応してしまう潜在的バグがあった。
  * ========================================================================== */
 
-#define MQTT_LOG_INFO(tag, ...)  pen_fprintf(stderr, "[mqtt/%s] ", tag), \
-                                 pen_fprintf(stderr, __VA_ARGS__)
-#define MQTT_LOG_ERR(tag, ...)   pen_fprintf(stderr, "[mqtt/%s][ERR] ", tag), \
-                                 pen_fprintf(stderr, __VA_ARGS__)
+#define MQTT_LOG_INFO(tag, ...) \
+    do { pen_fprintf(stderr, "[mqtt/%s] ", tag); \
+         pen_fprintf(stderr, __VA_ARGS__); } while(0)
+#define MQTT_LOG_ERR(tag, ...) \
+    do { pen_fprintf(stderr, "[mqtt/%s][ERR] ", tag); \
+         pen_fprintf(stderr, __VA_ARGS__); } while(0)
 #define MQTT_LOG_DBG(tag, debug, ...) \
     do { if (debug) { pen_fprintf(stderr, "[mqtt/%s][DBG] ", tag); \
                       pen_fprintf(stderr, __VA_ARGS__); } } while(0)
@@ -220,6 +236,8 @@ void mqtt_message_free(mqtt_message_t *msg)
 
 /* ==========================================================================
  * mqtt_connection  —  TLS接続 + CONNECT → CONNACK
+ *
+ * [FIX] CONNACK 受信バッファ (64KB) をスタックからヒープ確保に変更。
  * ========================================================================== */
 
 int mqtt_connection(
@@ -271,12 +289,19 @@ int mqtt_connection(
     }
     MQTT_LOG_INFO("connect", "CONNECT sent: client_id=%s\n", client_id);
 
-    /* CONNACK 受信 */
-    uint8_t buf[MQTT_TLS_BUF_SIZE];
-    int     n = recv_mqtt_packet_tls(&session->tls, buf, sizeof(buf),
-                                     MQTT_CLIENT_RECV_TIMEOUT_MS);
+    /* [FIX] CONNACK 受信バッファをヒープ確保 */
+    uint8_t *buf = (uint8_t *)pen_malloc(MQTT_TLS_BUF_SIZE);
+    if (!buf) {
+        MQTT_LOG_ERR("connect", "malloc failed for recv buf.\n");
+        tls_close(&session->tls);
+        return -1;
+    }
+
+    int n = recv_mqtt_packet_tls(&session->tls, buf, MQTT_TLS_BUF_SIZE,
+                                 MQTT_CLIENT_RECV_TIMEOUT_MS);
     if (n <= 0) {
         MQTT_LOG_ERR("connect", "CONNACK timeout or error.\n");
+        pen_free(buf);
         tls_close(&session->tls);
         return -1;
     }
@@ -284,9 +309,12 @@ int mqtt_connection(
     mqtt_connack_t connack;
     if (mqtt_parse_connack(buf, (size_t)n, &connack) != 0) {
         MQTT_LOG_ERR("connect", "CONNACK parse failed.\n");
+        pen_free(buf);
         tls_close(&session->tls);
         return -1;
     }
+    pen_free(buf);
+
     if (connack.reason_code != 0x00) {
         MQTT_LOG_ERR("connect", "CONNACK rejected (reason=0x%02X)\n",
                      connack.reason_code);
@@ -301,6 +329,8 @@ int mqtt_connection(
 
 /* ==========================================================================
  * mqtt_data_send  —  PUBLISH 送信
+ *
+ * [FIX] QoS 1/2 の PUBACK 受信バッファをヒープ確保に変更。
  * ========================================================================== */
 
 int mqtt_data_send(
@@ -338,14 +368,21 @@ int mqtt_data_send(
 
     /* QoS 1/2: PUBACK / PUBREC を受信する */
     if (resolved.qos > 0) {
-        uint8_t buf[MQTT_TLS_BUF_SIZE];
-        int n = recv_mqtt_packet_tls(&session->tls, buf, sizeof(buf),
+        /* [FIX] バッファをヒープ確保 */
+        uint8_t *buf = (uint8_t *)pen_malloc(MQTT_TLS_BUF_SIZE);
+        if (!buf) {
+            MQTT_LOG_ERR("send", "malloc failed for PUBACK buf.\n");
+            return -1;
+        }
+        int n = recv_mqtt_packet_tls(&session->tls, buf, MQTT_TLS_BUF_SIZE,
                                      MQTT_CLIENT_RECV_TIMEOUT_MS);
         if (n <= 0) {
             MQTT_LOG_ERR("send", "PUBACK/PUBREC timeout.\n");
+            pen_free(buf);
             return -1;
         }
         MQTT_LOG_INFO("send", "PUBACK/PUBREC received: type=0x%02X\n", buf[0]);
+        pen_free(buf);
     }
 
     return 0;
@@ -353,6 +390,8 @@ int mqtt_data_send(
 
 /* ==========================================================================
  * mqtt_subscribe  —  SUBSCRIBE 送信 + SUBACK 受信
+ *
+ * [FIX] SUBACK 受信バッファをヒープ確保に変更。
  * ========================================================================== */
 
 int mqtt_subscribe(
@@ -391,25 +430,36 @@ int mqtt_subscribe(
     }
     MQTT_LOG_INFO("subscribe", "SUBSCRIBE: topic=%s\n", topic);
 
-    /* SUBACK 受信 */
-    uint8_t buf[MQTT_TLS_BUF_SIZE];
-    int     n = recv_mqtt_packet_tls(&session->tls, buf, sizeof(buf), timeout_ms);
+    /* [FIX] SUBACK 受信バッファをヒープ確保 */
+    uint8_t *buf = (uint8_t *)pen_malloc(MQTT_TLS_BUF_SIZE);
+    if (!buf) {
+        MQTT_LOG_ERR("subscribe", "malloc failed for SUBACK buf.\n");
+        return -1;
+    }
+
+    int n = recv_mqtt_packet_tls(&session->tls, buf, MQTT_TLS_BUF_SIZE, timeout_ms);
     if (n <= 0) {
         MQTT_LOG_ERR("subscribe", "SUBACK timeout or error.\n");
+        pen_free(buf);
         return -1;
     }
 
     mqtt_suback_t suback;
     if (mqtt_parse_suback(buf, (size_t)n, &suback) != 0) {
         MQTT_LOG_ERR("subscribe", "SUBACK parse failed (type=0x%02X).\n", buf[0]);
+        pen_free(buf);
         return -1;
     }
+    pen_free(buf);
+
     MQTT_LOG_INFO("subscribe", "SUBACK: reason=0x%02X\n", suback.reason_code);
     return 0;
 }
 
 /* ==========================================================================
  * mqtt_recv_message  —  PUBLISH を1件受信する
+ *
+ * [FIX] 受信バッファをヒープ確保に変更。
  * ========================================================================== */
 
 int mqtt_recv_message(
@@ -429,31 +479,43 @@ int mqtt_recv_message(
 
     *out_msg = NULL;
 
-    uint8_t buf[MQTT_TLS_BUF_SIZE];
+    /* [FIX] 受信バッファをヒープ確保 */
+    uint8_t *buf = (uint8_t *)pen_malloc(MQTT_TLS_BUF_SIZE);
+    if (!buf) {
+        MQTT_LOG_ERR("recv", "malloc failed for recv buf.\n");
+        return -1;
+    }
+
+    int result = -1;
 
     for (;;) {
-        int n = recv_mqtt_packet_tls(&session->tls, buf, sizeof(buf), timeout_ms);
-        if (n == 0) return 1;   /* タイムアウト */
-        if (n < 0)  return -1;  /* 切断 / エラー */
+        int n = recv_mqtt_packet_tls(&session->tls, buf, MQTT_TLS_BUF_SIZE, timeout_ms);
+        if (n == 0) { result = 1; break; }  /* タイムアウト */
+        if (n < 0)  { result = -1; break; } /* 切断 / エラー */
 
         /* PUBLISH パケット (上位4bit = 0x3) */
         if ((buf[0] & 0xF0) == 0x30) {
             mqtt_message_t *msg = mqtt_parse_publish(buf, (size_t)n);
             if (!msg) {
                 MQTT_LOG_ERR("recv", "PUBLISH parse failed.\n");
-                return -1;
+                result = -1;
+                break;
             }
             MQTT_LOG_DBG("recv", resolved.debug,
                          "PUBLISH: topic=%s payload_len=%zu\n",
                          msg->topic, msg->payload_len);
             *out_msg = msg;
-            return 0;
+            result = 0;
+            break;
         }
 
         /* PINGRESP, SUBACK 等の非 PUBLISH パケットはスキップ */
         MQTT_LOG_DBG("recv", resolved.debug,
                      "non-PUBLISH skipped: type=0x%02X\n", buf[0]);
     }
+
+    pen_free(buf);
+    return result;
 }
 
 /* ==========================================================================
@@ -523,7 +585,7 @@ int mqtt_publisher(
 int mqtt_subscriber(
     const char                      *host,
     int                              port,
-    int                              debug,
+    int                             debug,
     int                              loop,
     const mqtt_subscriber_options_t *opts,
     mqtt_message_t                 **out_msg

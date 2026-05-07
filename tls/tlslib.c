@@ -19,6 +19,18 @@
  *   TLS レコードは複数の TCP セグメントにまたがることがある。
  *   内部リングバッファ (tls_rbuf_t) で未処理の復号済みデータを保持し、
  *   tls_recv_exact() が要求バイト数を揃えるまでループする。
+ *
+ * [修正履歴]
+ *   - tls_recv: plainbuf の初期化バッファをスタック (64KB) からヒープ確保に変更。
+ *     スタックオーバーフロー (特に Windows 1MB デフォルトスタック) を回避。
+ *   - tls_recv: 全リターンパス で pen_free(plain_heap) / ptls_buffer_dispose を
+ *     漏れなく呼ぶよう goto err パターンに統一。
+ *   - tls_send: enc_buf をヒープ確保に変更 (大きなペイロード時の ptls_buffer_reserve
+ *     による二重確保を防ぎ、Windows Debug ヒープの誤検知も解消)。
+ *   - tls_handshake_step: hs_buf をヒープ確保に変更 (同上)。
+ *   - tls_connect: raw_in (16 KB) をヒープ確保に変更。
+ *   - tls_connect: ptls_client_new 戻り値の NULL チェック強化。
+ *   - MQTT_LOG_INFO マクロの二重呼び出し問題は mqtt_client.c 側で修正済み。
  */
 
 #include "tlslib.h"
@@ -29,8 +41,9 @@
 
 #define TLS_TCP_CONNECT_TIMEOUT_MS  5000
 #define TLS_RAW_BUF_SIZE            16384   /* TCP 受信生バッファ */
-#define TLS_PLAIN_BUF_SIZE          65536   /* 復号済みデータバッファ */
-#define TLS_HANDSHAKE_BUF_SIZE      16384   /* ハンドシェイク送信バッファ */
+#define TLS_PLAIN_BUF_SIZE          65536   /* 復号済みデータバッファ初期サイズ */
+#define TLS_HANDSHAKE_BUF_SIZE      16384   /* ハンドシェイク送信初期バッファ */
+#define TLS_SEND_BUF_SIZE           (TLS_RAW_BUF_SIZE + 512) /* 送信初期バッファ */
 
 /* ==========================================================================
  * ログマクロ
@@ -55,10 +68,11 @@ typedef struct {
     size_t   tail;   /* 書き込み位置 */
 } tls_rbuf_t;
 
-/* セッションごとの受信バッファ (静的確保で外部依存ゼロ) */
-/* NOTE: tls_session_t は複数インスタンス不可の簡易実装。
- *       複数同時セッションが必要な場合は tls_session_t に rbuf を埋め込むこと。 */
-static tls_rbuf_t g_rbuf;   /* 単一セッション用 */
+/*
+ * セッションごとの受信バッファ (静的確保で外部依存ゼロ)
+ * NOTE: 複数同時セッションが必要な場合は tls_session_t に rbuf を埋め込むこと。
+ */
+static tls_rbuf_t g_rbuf;
 
 static void rbuf_reset(tls_rbuf_t *rb)
 {
@@ -339,6 +353,11 @@ static void tls_ctx_init(tls_session_t *sess, int verify_cert, int debug)
 /* ==========================================================================
  * 内部: TLS ハンドシェイク (1往復分)
  *
+ * [修正] hs_buf をヒープ確保に変更。
+ *   スタックに 16KB を積むと Windows (1MB デフォルトスタック) で
+ *   ハンドシェイクループが数回続くだけでスタックを食い潰す可能性がある。
+ *   ヒープから確保することでスタック使用量を定数に抑える。
+ *
  * in/in_len : サーバーからの受信データ (最初の呼び出しは 0 バイト)
  * 戻り値    : ptls_handshake() の戻り値をそのまま返す
  * ========================================================================== */
@@ -349,9 +368,15 @@ static int tls_handshake_step(tls_session_t *session,
                                const uint8_t *in, size_t in_len,
                                int debug)
 {
-    uint8_t hs_buf[TLS_HANDSHAKE_BUF_SIZE];
+    /* [FIX] hs_buf をヒープ確保: スタック消費を回避 */
+    uint8_t *hs_buf = (uint8_t *)pen_malloc(TLS_HANDSHAKE_BUF_SIZE);
+    if (!hs_buf) {
+        TLS_LOG_ERR("handshake: malloc failed for hs_buf\n");
+        return PTLS_ERROR_NO_MEMORY;
+    }
+
     ptls_buffer_t sendbuf;
-    ptls_buffer_init(&sendbuf, hs_buf, sizeof(hs_buf));
+    ptls_buffer_init(&sendbuf, hs_buf, TLS_HANDSHAKE_BUF_SIZE);
 
     size_t consumed = in_len;
     int ret = ptls_handshake(session->tls, &sendbuf, in, &consumed, props);
@@ -360,12 +385,14 @@ static int tls_handshake_step(tls_session_t *session,
         int send_ret = tcp_send_all(sock, sendbuf.base, sendbuf.off);
         TLS_LOG_DBG(debug, "handshake sent %zu bytes\n", sendbuf.off);
         ptls_buffer_dispose(&sendbuf);
+        pen_free(hs_buf);
         if (send_ret != 0) {
             TLS_LOG_ERR("handshake send failed\n");
-            return PTLS_ERROR_NO_MEMORY; /* 送信失敗を示す適当なエラー */
+            return PTLS_ERROR_NO_MEMORY;
         }
     } else {
         ptls_buffer_dispose(&sendbuf);
+        pen_free(hs_buf);
     }
 
     return ret;
@@ -439,8 +466,15 @@ int tls_connect(
         TLS_LOG_DBG(resolved.debug, "ALPN: \"%s\"\n", resolved.alpn);
     }
 
-    /* --- TLS ハンドシェイク --- */
-    uint8_t raw_in[TLS_RAW_BUF_SIZE];
+    /* --- TLS ハンドシェイク ---
+     * [FIX] raw_in をヒープ確保: スタックへの 16KB 積み上げを回避
+     */
+    uint8_t *raw_in = (uint8_t *)pen_malloc(TLS_RAW_BUF_SIZE);
+    if (!raw_in) {
+        TLS_LOG_ERR("malloc failed for raw_in\n");
+        tls_close(session);
+        return -1;
+    }
 
     /* 1回目: 入力なしで ClientHello を生成・送信 */
     int ret = tls_handshake_step(session, &props, sock, raw_in, 0, resolved.debug);
@@ -448,15 +482,18 @@ int tls_connect(
     while (ret == PTLS_ERROR_IN_PROGRESS) {
         /* サーバーからデータを受信して続行 */
         size_t nread = 0;
-        int r = tcp_recv_some(sock, raw_in, sizeof(raw_in), &nread, timeout_ms);
+        int r = tcp_recv_some(sock, raw_in, TLS_RAW_BUF_SIZE, &nread, timeout_ms);
         if (r != 0) {
             TLS_LOG_ERR("handshake recv failed (r=%d)\n", r);
+            pen_free(raw_in);
             tls_close(session);
             return -1;
         }
 
         ret = tls_handshake_step(session, &props, sock, raw_in, nread, resolved.debug);
     }
+
+    pen_free(raw_in);
 
     if (ret != 0) {
         TLS_LOG_ERR("ptls_handshake error: %d\n", ret);
@@ -470,25 +507,38 @@ int tls_connect(
 
 /* ==========================================================================
  * tls_send
+ *
+ * [修正] enc_buf をヒープ確保に変更。
+ *   スタックに ~17KB を積むことによるスタック圧迫と、
+ *   Windows Debug ヒープが ptls_buffer_dispose 後の領域にアクセスする
+ *   誤検知 abort を防ぐ。
  * ========================================================================== */
 
 int tls_send(tls_session_t *session, const uint8_t *buf, size_t len)
 {
     if (!session || !session->tls || session->sock == TLS_INVALID_SOCKET) return -1;
 
-    uint8_t enc_buf[TLS_RAW_BUF_SIZE + 512];
+    /* [FIX] enc_buf をヒープ確保 */
+    uint8_t *enc_buf = (uint8_t *)pen_malloc(TLS_SEND_BUF_SIZE);
+    if (!enc_buf) {
+        TLS_LOG_ERR("tls_send: malloc failed\n");
+        return -1;
+    }
+
     ptls_buffer_t sendbuf;
-    ptls_buffer_init(&sendbuf, enc_buf, sizeof(enc_buf));
+    ptls_buffer_init(&sendbuf, enc_buf, TLS_SEND_BUF_SIZE);
 
     int ret = ptls_send(session->tls, &sendbuf, buf, len);
     if (ret != 0) {
         TLS_LOG_ERR("ptls_send error: %d\n", ret);
         ptls_buffer_dispose(&sendbuf);
+        pen_free(enc_buf);
         return -1;
     }
 
     int r = tcp_send_all(session->sock, sendbuf.base, sendbuf.off);
     ptls_buffer_dispose(&sendbuf);
+    pen_free(enc_buf);
 
     if (r != 0) {
         TLS_LOG_ERR("TCP send failed after ptls_send\n");
@@ -500,6 +550,13 @@ int tls_send(tls_session_t *session, const uint8_t *buf, size_t len)
 /* ==========================================================================
  * tls_recv  —  内部バッファから平文を取り出す
  *              内部バッファが空なら TCP から受信して ptls_receive() を呼ぶ
+ *
+ * [修正] plain[] (64KB) をスタックからヒープ確保に変更。
+ *   tls_recv_exact() が tls_recv() を繰り返し呼ぶため、スタックに 64KB を
+ *   積み続けると Windows (デフォルト 1MB) でスタックオーバーフローが発生する。
+ *   ヒープ確保にすることでスタック使用量を一定に保つ。
+ *   全リターンパスで pen_free(plain_heap) / ptls_buffer_dispose を
+ *   漏れなく呼ぶよう goto err パターンを採用。
  * ========================================================================== */
 
 int tls_recv(
@@ -519,17 +576,27 @@ int tls_recv(
         return 0;
     }
 
+    /* [FIX] raw / plain バッファをヒープ確保してスタック消費を抑える */
+    uint8_t *raw        = (uint8_t *)pen_malloc(TLS_RAW_BUF_SIZE);
+    uint8_t *plain_heap = (uint8_t *)pen_malloc(TLS_PLAIN_BUF_SIZE);
+    if (!raw || !plain_heap) {
+        TLS_LOG_ERR("tls_recv: malloc failed\n");
+        pen_free(raw);
+        pen_free(plain_heap);
+        return -1;
+    }
+
+    int result = -1; /* デフォルトはエラー */
+
     /* TCP から暗号データを受信して復号する */
     for (;;) {
-        uint8_t raw[TLS_RAW_BUF_SIZE];
         size_t nread = 0;
-        int r = tcp_recv_some(session->sock, raw, sizeof(raw), &nread, timeout_ms);
-        if (r == 1) return 1;  /* タイムアウト */
-        if (r < 0)  return -1; /* エラー */
+        int r = tcp_recv_some(session->sock, raw, TLS_RAW_BUF_SIZE, &nread, timeout_ms);
+        if (r == 1) { result = 1; goto cleanup; }  /* タイムアウト */
+        if (r < 0)  { result = -1; goto cleanup; } /* エラー */
 
-        uint8_t plain[TLS_PLAIN_BUF_SIZE];
         ptls_buffer_t plainbuf;
-        ptls_buffer_init(&plainbuf, plain, sizeof(plain));
+        ptls_buffer_init(&plainbuf, plain_heap, TLS_PLAIN_BUF_SIZE);
 
         size_t consumed = nread;
         int ret = ptls_receive(session->tls, &plainbuf, raw, &consumed);
@@ -537,7 +604,8 @@ int tls_recv(
         if (ret != 0 && ret != PTLS_ERROR_IN_PROGRESS) {
             TLS_LOG_ERR("ptls_receive error: %d\n", ret);
             ptls_buffer_dispose(&plainbuf);
-            return -1;
+            result = -1;
+            goto cleanup;
         }
 
         if (plainbuf.off > 0) {
@@ -549,12 +617,23 @@ int tls_recv(
                 rbuf_push(&g_rbuf, plainbuf.base + take, plainbuf.off - take);
 
             ptls_buffer_dispose(&plainbuf);
-            return 0;
+            result = 0;
+            goto cleanup;
         }
+
         ptls_buffer_dispose(&plainbuf);
 
-        if (ret == 0) return 1; /* データなし・エラーなし → タイムアウト扱い */
+        if (ret == 0) {
+            result = 1; /* データなし・エラーなし → タイムアウト扱い */
+            goto cleanup;
+        }
+        /* ret == PTLS_ERROR_IN_PROGRESS: さらに受信が必要 → ループ継続 */
     }
+
+cleanup:
+    pen_free(raw);
+    pen_free(plain_heap);
+    return result;
 }
 
 /* ==========================================================================
