@@ -1,15 +1,1 @@
 build/
-*.exe
-*.o
-*.a
-*.so
-*.dll
-*.pdb
-*.ilk
-*.exp
-*.lib
-.cache/
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
