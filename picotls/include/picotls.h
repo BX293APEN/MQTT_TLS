@@ -29,9 +29,8 @@
 extern "C" {
 #endif
 
-#ifdef _WINDOWS
-#include "wincompat.h"
-#endif
+/* Windows 互換定義 (ssize_t / socklen_t / MSG_NOSIGNAL 等) は
+ * penlib.h の _WINDOWS ブロックに集約済み。wincompat.h は不要。 */
 
 /* penlib.h が sys/types.h を集約済み */
 

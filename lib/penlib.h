@@ -196,6 +196,34 @@ intmax_t pen_imaxabs(intmax_t j);
 #  ifndef EAGAIN
 #    define EAGAIN       WSAEWOULDBLOCK
 #  endif
+   /* -----------------------------------------------------------------------
+    * POSIX 互換型・定数 (MSVC / Windows SDK では未定義のもの)
+    *
+    * ssize_t    : 符号付きサイズ型。picotls.c / tlslib.c 等で使用。
+    *              Windows SDK 提供の SSIZE_T (BaseTsd.h) を利用する。
+    *              BaseTsd.h は winsock2.h → windows.h 経由で展開済み。
+    * socklen_t  : winsock2.h / ws2tcpip.h で定義されているが、
+    *              MinGW 旧版で露出しない場合があるため念のため補完。
+    * MSG_NOSIGNAL: POSIX の send() フラグ。Windows の send() は
+    *              SIGPIPE を送出しないため 0 で代替する。
+    * ----------------------------------------------------------------------- */
+#  ifndef ssize_t
+     typedef SSIZE_T ssize_t;
+#  endif
+#  ifndef socklen_t
+     typedef int socklen_t;
+#  endif
+#  ifndef MSG_NOSIGNAL
+#    define MSG_NOSIGNAL 0
+#  endif
+   /* __attribute__((format(...))) 等の GCC/Clang 拡張は MSVC が解釈できない。
+    * 空マクロで無効化することで picotls.h / picotls.c のコンパイルエラーを回避する。
+    * MSVC は __declspec(...) で同等機能を提供するが、printf 書式チェックは
+    * SAL アノテーション (_Printf_format_string_) で行う。本プロジェクトでは
+    * 書式チェックが必須ではないため、単純に無効化する。 */
+#  ifndef __attribute__
+#    define __attribute__(x)
+#  endif
 #else  /* POSIX */
 #  include <sys/socket.h>  /* socket / bind / connect / send / recv 等 */
 #  include <sys/types.h>   /* ssize_t / pid_t 等 */
