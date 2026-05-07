@@ -34,7 +34,8 @@ mqtt_xxxx()  MQTT 操作          (mqtt_client.h)
 ```bash
 mkdir build && cd build
 cmake ..
-cmake --build .
+make -j$(nproc)        # Linux / MinGW
+# cmake --build .      # MSVC / クロスプラットフォーム共通
 ```
 
 ### オプション
