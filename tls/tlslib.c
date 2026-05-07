@@ -10,7 +10,7 @@
  *
  * TLS 層:
  *   ptls_client_new()  → TLS ハンドル生成
- *   ptls_handshake()   → TLS ハンドシェイク
+ *   ptls_handshake()   → TLS ハンドシェイク (ALPN を含む)
  *   ptls_send()        → アプリデータ暗号化送信
  *   ptls_receive()     → 受信データ復号
  *   ptls_free()        → ハンドル解放
@@ -153,7 +153,71 @@ static int sock_wait_readable(tls_socket_t sock, int timeout_ms)
 #endif
 }
 
-/* TCP 接続 (タイムアウト付き) */
+/* ==========================================================================
+ * 内部: ソケットクローズ
+ * ========================================================================== */
+
+static void sock_close(tls_socket_t sock)
+{
+    if (sock == TLS_INVALID_SOCKET) return;
+#ifdef _WINDOWS
+    closesocket(sock);
+#else
+    close(sock);
+#endif
+}
+
+/* ==========================================================================
+ * 内部: TCP 接続試行 (1アドレス分)
+ *
+ * 成功: ブロッキングモードのソケットを返す
+ * 失敗: TLS_INVALID_SOCKET を返す (ソケットは内部でクローズ済み)
+ * ========================================================================== */
+
+static tls_socket_t tcp_try_connect(struct addrinfo *p, int timeout_ms)
+{
+#ifdef _WINDOWS
+    tls_socket_t sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+    if (sock == TLS_INVALID_SOCKET) return TLS_INVALID_SOCKET;
+
+    if (sock_set_nonblocking(sock, 1) != 0) {
+        sock_close(sock);
+        return TLS_INVALID_SOCKET;
+    }
+
+    int r        = connect(sock, p->ai_addr, (int)p->ai_addrlen);
+    int in_prog  = (r == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK);
+#else
+    tls_socket_t sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+    if (sock == TLS_INVALID_SOCKET) return TLS_INVALID_SOCKET;
+
+    if (sock_set_nonblocking(sock, 1) != 0) {
+        sock_close(sock);
+        return TLS_INVALID_SOCKET;
+    }
+
+    int r       = connect(sock, p->ai_addr, p->ai_addrlen);
+    int in_prog = (r < 0 && errno == EINPROGRESS);
+#endif
+
+    if (r != 0 && !in_prog) {
+        sock_close(sock);
+        return TLS_INVALID_SOCKET;
+    }
+
+    if (in_prog && sock_wait_writable(sock, timeout_ms) != 0) {
+        sock_close(sock);
+        return TLS_INVALID_SOCKET;
+    }
+
+    sock_set_nonblocking(sock, 0);
+    return sock;
+}
+
+/* ==========================================================================
+ * 内部: TCP 接続 (タイムアウト付き、複数アドレス対応)
+ * ========================================================================== */
+
 static tls_socket_t tcp_connect(const char *host, int port, int timeout_ms)
 {
     char port_str[8];
@@ -171,47 +235,38 @@ static tls_socket_t tcp_connect(const char *host, int port, int timeout_ms)
 
     tls_socket_t sock = TLS_INVALID_SOCKET;
 
-    for (struct addrinfo *p = res; p; p = p->ai_next) {
-        sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (sock == TLS_INVALID_SOCKET) continue;
-
+    for (struct addrinfo *p = res; p != NULL && sock == TLS_INVALID_SOCKET; p = p->ai_next) {
         if (timeout_ms > 0) {
-            if (sock_set_nonblocking(sock, 1) != 0) {
-                goto next;
-            }
-#ifdef _WINDOWS
-            int r = connect(sock, p->ai_addr, (int)p->ai_addrlen);
-            int in_prog = (r == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK);
-#else
-            int r = connect(sock, p->ai_addr, p->ai_addrlen);
-            int in_prog = (r < 0 && errno == EINPROGRESS);
-#endif
-            if (r == 0 || in_prog) {
-                if (in_prog && sock_wait_writable(sock, timeout_ms) != 0) goto next;
-                sock_set_nonblocking(sock, 0);
-                break;
-            }
+            sock = tcp_try_connect(p, timeout_ms);
         } else {
 #ifdef _WINDOWS
-            if (connect(sock, p->ai_addr, (int)p->ai_addrlen) == 0) break;
+            tls_socket_t s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+            if (s != TLS_INVALID_SOCKET) {
+                if (connect(s, p->ai_addr, (int)p->ai_addrlen) == 0)
+                    sock = s;
+                else
+                    sock_close(s);
+            }
 #else
-            if (connect(sock, p->ai_addr, p->ai_addrlen) == 0) break;
+            tls_socket_t s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+            if (s != TLS_INVALID_SOCKET) {
+                if (connect(s, p->ai_addr, p->ai_addrlen) == 0)
+                    sock = s;
+                else
+                    sock_close(s);
+            }
 #endif
         }
-next:
-#ifdef _WINDOWS
-        closesocket(sock);
-#else
-        close(sock);
-#endif
-        sock = TLS_INVALID_SOCKET;
     }
 
     freeaddrinfo(res);
     return sock;
 }
 
-/* TCP 全送信 */
+/* ==========================================================================
+ * 内部: TCP 全送信
+ * ========================================================================== */
+
 static int tcp_send_all(tls_socket_t sock, const uint8_t *buf, size_t len)
 {
     size_t sent = 0;
@@ -228,7 +283,10 @@ static int tcp_send_all(tls_socket_t sock, const uint8_t *buf, size_t len)
     return 0;
 }
 
-/* TCP 受信 (最大 buf_max バイト、タイムアウト付き) */
+/* ==========================================================================
+ * 内部: TCP 受信 (最大 buf_max バイト、タイムアウト付き)
+ * ========================================================================== */
+
 static int tcp_recv_some(tls_socket_t sock, uint8_t *buf, size_t buf_max,
                           size_t *out_len, int timeout_ms)
 {
@@ -245,17 +303,6 @@ static int tcp_recv_some(tls_socket_t sock, uint8_t *buf, size_t buf_max,
 #endif
     *out_len = (size_t)n;
     return 0;
-}
-
-/* TCP ソケットクローズ */
-static void tcp_close_sock(tls_socket_t sock)
-{
-    if (sock == TLS_INVALID_SOCKET) return;
-#ifdef _WINDOWS
-    closesocket(sock);
-#else
-    close(sock);
-#endif
 }
 
 /* ==========================================================================
@@ -287,8 +334,41 @@ static void tls_ctx_init(tls_session_t *sess, int verify_cert, int debug)
     if (!verify_cert) {
         sess->ctx.verify_certificate = NULL;
     }
+}
 
-    /* get_time は省略 (picotls のデフォルトが使われる) */
+/* ==========================================================================
+ * 内部: TLS ハンドシェイク (1往復分)
+ *
+ * in/in_len : サーバーからの受信データ (最初の呼び出しは 0 バイト)
+ * 戻り値    : ptls_handshake() の戻り値をそのまま返す
+ * ========================================================================== */
+
+static int tls_handshake_step(tls_session_t *session,
+                               ptls_handshake_properties_t *props,
+                               tls_socket_t sock,
+                               const uint8_t *in, size_t in_len,
+                               int debug)
+{
+    uint8_t hs_buf[TLS_HANDSHAKE_BUF_SIZE];
+    ptls_buffer_t sendbuf;
+    ptls_buffer_init(&sendbuf, hs_buf, sizeof(hs_buf));
+
+    size_t consumed = in_len;
+    int ret = ptls_handshake(session->tls, &sendbuf, in, &consumed, props);
+
+    if (sendbuf.off > 0) {
+        int send_ret = tcp_send_all(sock, sendbuf.base, sendbuf.off);
+        TLS_LOG_DBG(debug, "handshake sent %zu bytes\n", sendbuf.off);
+        ptls_buffer_dispose(&sendbuf);
+        if (send_ret != 0) {
+            TLS_LOG_ERR("handshake send failed\n");
+            return PTLS_ERROR_NO_MEMORY; /* 送信失敗を示す適当なエラー */
+        }
+    } else {
+        ptls_buffer_dispose(&sendbuf);
+    }
+
+    return ret;
 }
 
 /* ==========================================================================
@@ -325,7 +405,7 @@ int tls_connect(
     session->tls = ptls_client_new(&session->ctx);
     if (!session->tls) {
         TLS_LOG_ERR("ptls_client_new failed\n");
-        tcp_close_sock(sock);
+        sock_close(sock);
         return -1;
     }
 
@@ -335,96 +415,56 @@ int tls_connect(
         TLS_LOG_ERR("ptls_set_server_name failed\n");
         ptls_free(session->tls);
         session->tls = NULL;
-        tcp_close_sock(sock);
+        sock_close(sock);
         return -1;
     }
 
     session->sock = sock;
-
-    /* 受信バッファ初期化 */
     rbuf_reset(&g_rbuf);
 
+    /* --- ALPN 設定 ---
+     * opts->alpn に文字列が指定されている場合のみ ClientHello に ALPN 拡張を付加する。
+     * MQTT over TLS: "mqtt"  (RFC 8422 / IANA 登録済み)
+     * ALPN なし     : NULL のまま (デフォルト)
+     */
+    ptls_handshake_properties_t props;
+    pen_memset(&props, 0, sizeof(props));
+
+    ptls_iovec_t alpn_proto;
+    if (resolved.alpn != NULL) {
+        alpn_proto.base = (uint8_t *)(uintptr_t)resolved.alpn;
+        alpn_proto.len  = pen_strlen(resolved.alpn);
+        props.client.negotiated_protocols.list  = &alpn_proto;
+        props.client.negotiated_protocols.count = 1;
+        TLS_LOG_DBG(resolved.debug, "ALPN: \"%s\"\n", resolved.alpn);
+    }
+
     /* --- TLS ハンドシェイク --- */
-    /* picotls のハンドシェイクは ptls_handshake() を入力バイト数が 0 になるまで繰り返す */
     uint8_t raw_in[TLS_RAW_BUF_SIZE];
 
-    for (;;) {
-        /* ハンドシェイク出力バッファ */
-        uint8_t hs_out[TLS_HANDSHAKE_BUF_SIZE];
-        ptls_buffer_t sendbuf;
-        ptls_buffer_init(&sendbuf, hs_out, sizeof(hs_out));
+    /* 1回目: 入力なしで ClientHello を生成・送信 */
+    int ret = tls_handshake_step(session, &props, sock, raw_in, 0, resolved.debug);
 
-        size_t inlen = 0;
-        int ret = ptls_handshake(session->tls, &sendbuf, raw_in, &inlen, NULL);
-
-        /* ハンドシェイクデータを送信 */
-        if (sendbuf.off > 0) {
-            if (tcp_send_all(sock, sendbuf.base, sendbuf.off) != 0) {
-                TLS_LOG_ERR("handshake send failed\n");
-                ptls_buffer_dispose(&sendbuf);
-                tls_close(session);
-                return -1;
-            }
-            TLS_LOG_DBG(resolved.debug, "handshake sent %zu bytes\n", sendbuf.off);
-        }
-        ptls_buffer_dispose(&sendbuf);
-
-        if (ret == 0) {
-            /* ハンドシェイク完了 */
-            TLS_LOG_INFO("TLS handshake complete: %s:%d\n", host, port);
-            break;
-        }
-        if (ret == PTLS_ERROR_IN_PROGRESS) {
-            /* サーバーからのデータを受信して続行 */
-            size_t nread = 0;
-            int r = tcp_recv_some(sock, raw_in, sizeof(raw_in), &nread, timeout_ms);
-            if (r != 0) {
-                TLS_LOG_ERR("handshake recv failed (r=%d)\n", r);
-                tls_close(session);
-                return -1;
-            }
-            /* 次の ptls_handshake() に raw_in[0..nread] を渡す */
-            (void)nread; /* inlen に nread を渡すのが正しいが、
-                          * picotls の API では input ポインタと inlen で制御する */
-            /* picotls はハンドシェイク中に input/inlen を更新する方式なので
-             * ループの先頭で inlen=0 として再呼び出しすると空呼び出しになる。
-             * 正しくは受信データを渡す必要がある。 */
-
-            /* 受信データを先頭から渡して再ループ */
-            uint8_t hs_out2[TLS_HANDSHAKE_BUF_SIZE];
-            ptls_buffer_t sendbuf2;
-            ptls_buffer_init(&sendbuf2, hs_out2, sizeof(hs_out2));
-            size_t consumed = nread;
-            ret = ptls_handshake(session->tls, &sendbuf2, raw_in, &consumed, NULL);
-
-            if (sendbuf2.off > 0) {
-                if (tcp_send_all(sock, sendbuf2.base, sendbuf2.off) != 0) {
-                    TLS_LOG_ERR("handshake send2 failed\n");
-                    ptls_buffer_dispose(&sendbuf2);
-                    tls_close(session);
-                    return -1;
-                }
-            }
-            ptls_buffer_dispose(&sendbuf2);
-
-            if (ret == 0) {
-                TLS_LOG_INFO("TLS handshake complete: %s:%d\n", host, port);
-                break;
-            }
-            if (ret != PTLS_ERROR_IN_PROGRESS) {
-                TLS_LOG_ERR("ptls_handshake error: %d\n", ret);
-                tls_close(session);
-                return -1;
-            }
-            /* さらに継続が必要 → 外側ループへ戻る */
-            continue;
+    while (ret == PTLS_ERROR_IN_PROGRESS) {
+        /* サーバーからデータを受信して続行 */
+        size_t nread = 0;
+        int r = tcp_recv_some(sock, raw_in, sizeof(raw_in), &nread, timeout_ms);
+        if (r != 0) {
+            TLS_LOG_ERR("handshake recv failed (r=%d)\n", r);
+            tls_close(session);
+            return -1;
         }
 
+        ret = tls_handshake_step(session, &props, sock, raw_in, nread, resolved.debug);
+    }
+
+    if (ret != 0) {
         TLS_LOG_ERR("ptls_handshake error: %d\n", ret);
         tls_close(session);
         return -1;
     }
 
+    TLS_LOG_INFO("TLS handshake complete: %s:%d\n", host, port);
     return 0;
 }
 
@@ -501,22 +541,19 @@ int tls_recv(
         }
 
         if (plainbuf.off > 0) {
-            /* 平文データが得られた */
             size_t take = (plainbuf.off < buf_max) ? plainbuf.off : buf_max;
             pen_memcpy(buf, plainbuf.base, take);
             *out_len = take;
 
-            /* 余剰データをリングバッファへ */
-            if (plainbuf.off > take) {
+            if (plainbuf.off > take)
                 rbuf_push(&g_rbuf, plainbuf.base + take, plainbuf.off - take);
-            }
+
             ptls_buffer_dispose(&plainbuf);
             return 0;
         }
         ptls_buffer_dispose(&plainbuf);
 
-        /* alert / handshake 後続パケット等で平文が出なかった場合は再試行 */
-        if (ret == 0) return 1; /* no data but no error = treat as timeout */
+        if (ret == 0) return 1; /* データなし・エラーなし → タイムアウト扱い */
     }
 }
 
@@ -551,16 +588,14 @@ void tls_close(tls_session_t *session)
     if (!session) return;
 
     if (session->tls && session->sock != TLS_INVALID_SOCKET) {
-        /* close_notify アラートを送信 */
         uint8_t alert_buf[256];
         ptls_buffer_t sendbuf;
         ptls_buffer_init(&sendbuf, alert_buf, sizeof(alert_buf));
         ptls_send_alert(session->tls, &sendbuf,
                         PTLS_ALERT_LEVEL_WARNING,
                         PTLS_ALERT_CLOSE_NOTIFY);
-        if (sendbuf.off > 0) {
+        if (sendbuf.off > 0)
             tcp_send_all(session->sock, sendbuf.base, sendbuf.off);
-        }
         ptls_buffer_dispose(&sendbuf);
     }
 
@@ -569,7 +604,7 @@ void tls_close(tls_session_t *session)
         session->tls = NULL;
     }
 
-    tcp_close_sock(session->sock);
+    sock_close(session->sock);
     session->sock = TLS_INVALID_SOCKET;
 
     rbuf_reset(&g_rbuf);

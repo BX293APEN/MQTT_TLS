@@ -1,5 +1,5 @@
 /*
- * penlib.c  —  PENQUIC ポータブル標準ライブラリ抽象化レイヤ 実装
+ * penlib.c  —  MQTT-TLS ポータブル標準ライブラリ抽象化レイヤ 実装
  *
  * 現在はすべて libc / OS API に委譲する実装 (デスクトップ向けデフォルト)。
  * IoT / 組み込み環境への移植時はこのファイルの実装ブロックのみ差し替える。
@@ -505,7 +505,7 @@ int pen_fprintf(FILE* stream, const char* fmt, ...)
 int pen_vfprintf(FILE* stream, const char* fmt, va_list ap)
 {
     /*
-     * va_list 版 fprintf。picoquic の内部ログ関数 (debug_printf 等) から呼ばれる。
+     * va_list 版 fprintf。内部ログ関数から呼ばれる。
      * MSVC では vfprintf_s に委譲してバッファオーバーラン検出を有効にする。
      * 組み込み環境では独自の出力バックエンド (UART / RTT 等) に差し替えること。
      */
@@ -693,16 +693,16 @@ void pen_thread_setname(const char* name)
  *   UTC からのオフセット秒数を返す。東 = 正、西 = 負。
  *
  *   優先順位:
- *     1. PENQUIC_TZ_FROM_OS が定義されている場合:
+ *     1. MQTT_TZ_FROM_OS が定義されている場合:
  *        OS の localtime() から動的に取得する。
- *     2. PENQUIC_UTC_OFFSET_SEC が定義されている場合:
+ *     2. MQTT_UTC_OFFSET_SEC が定義されている場合:
  *        そのコンパイル時定数を返す。
  *     3. いずれも未定義の場合:
  *        デフォルト JST (UTC+9 = 32400 秒) を返す。
  * ===================================================================== */
 int32_t pen_get_utc_offset_sec(void)
 {
-#if defined(PENQUIC_TZ_FROM_OS)
+#if defined(MQTT_TZ_FROM_OS)
     /*
      * OS のタイムゾーン設定を使用する。
      * localtime() で現地時刻を取得し、mktime(gmtime()) との差分で
@@ -737,9 +737,9 @@ int32_t pen_get_utc_offset_sec(void)
     }
     return (int32_t)(local_t - gm_t);
 
-#elif defined(PENQUIC_UTC_OFFSET_SEC)
+#elif defined(MQTT_UTC_OFFSET_SEC)
     /* コンパイル時定数で指定された固定オフセット */
-    return (int32_t)(PENQUIC_UTC_OFFSET_SEC);
+    return (int32_t)(MQTT_UTC_OFFSET_SEC);
 
 #else
     /* デフォルト: 日本標準時 JST (UTC+9) */

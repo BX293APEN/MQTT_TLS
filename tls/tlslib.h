@@ -38,22 +38,9 @@ extern "C" {
  * ========================================================================== */
 
 #ifdef _WINDOWS
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
 typedef SOCKET tls_socket_t;
 #  define TLS_INVALID_SOCKET  INVALID_SOCKET
 #else
-#  include <sys/socket.h>
-#  include <netinet/in.h>
-#  include <arpa/inet.h>
-#  include <netdb.h>
-#  include <unistd.h>
-#  include <fcntl.h>
-#  include <errno.h>
-#  include <poll.h>
 typedef int    tls_socket_t;
 #  define TLS_INVALID_SOCKET  ((tls_socket_t)(-1))
 #endif
@@ -88,12 +75,16 @@ typedef struct {
  * ========================================================================== */
 
 typedef struct {
-    int  verify_cert;    /* 1=証明書検証を行う (デフォルト: 0=スキップ) */
-    int  timeout_ms;     /* 接続タイムアウト ms (0=5000ms) */
-    int  debug;          /* 1=デバッグ出力有効 */
+    int          verify_cert;  /* 1=証明書検証を行う (デフォルト: 0=スキップ) */
+    int          timeout_ms;   /* 接続タイムアウト ms (0=5000ms) */
+    int          debug;        /* 1=デバッグ出力有効 */
+    const char  *alpn;         /* ALPN プロトコル名 (NULL=ALPN なし)
+                                * MQTT over TLS : "mqtt"
+                                * MQTT over TLS (旧) : "mqttv3.1"
+                                * 送信しない場合は NULL のままにする */
 } tls_connect_options_t;
 
-#define TLS_CONNECT_OPTIONS_DEFAULT { 0, 5000, 0 }
+#define TLS_CONNECT_OPTIONS_DEFAULT { 0, 5000, 0, NULL }
 
 /* ==========================================================================
  * 公開 API

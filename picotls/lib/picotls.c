@@ -637,8 +637,50 @@ int ptls_buffer__adjust_quic_blocksize(ptls_buffer_t *buf, size_t body_size)
 
 int ptls_buffer__adjust_asn1_blocksize(ptls_buffer_t *buf, size_t body_size)
 {
-    pen_fprintf(stderr, "unimplemented\n");
-    pen_abort();
+    /* ASN.1 DER 長さエンコード (body_size >= 128 の場合)
+     *
+     * DER 長さフィールド:
+     *   128 <= body_size <= 255     : 0x81 body_size          (2バイト)
+     *   256 <= body_size <= 65535   : 0x82 high low           (3バイト)
+     *   65536 <= body_size <= ...   : 0x83 b2 b1 b0           (4バイト)
+     *
+     * マクロ ptls_buffer_push_asn1_block はダミーとして 0xff を 1バイト書き込み、
+     * その直後から body_size バイトの本体が続く。
+     * body_size >= 128 のとき、この 1バイトを本来の長さフィールド (2〜4バイト) に
+     * 拡張し、本体をその分後ろにずらす。
+     */
+    int ret;
+
+    /* 必要な長さフィールドのバイト数を決定 */
+    size_t size_len;
+    if (body_size <= 0xff) {
+        size_len = 2; /* 0x81 + 1バイト */
+    } else if (body_size <= 0xffff) {
+        size_len = 3; /* 0x82 + 2バイト */
+    } else if (body_size <= 0xffffff) {
+        size_len = 4; /* 0x83 + 3バイト */
+    } else {
+        return PTLS_ERROR_NO_MEMORY; /* 実用上到達しない */
+    }
+
+    /* ダミー 1バイト分はすでに確保済みなので、追加で (size_len - 1) バイト確保 */
+    if (size_len > 1) {
+        if ((ret = ptls_buffer_reserve(buf, size_len - 1)) != 0)
+            return ret;
+        /* 本体を後ろへずらす */
+        pen_memmove(buf->base + buf->off - body_size - 1 + size_len,
+                    buf->base + buf->off - body_size,
+                    body_size);
+        buf->off += size_len - 1;
+    }
+
+    /* 長さフィールドを書き込む */
+    uint8_t *p = buf->base + buf->off - body_size - size_len;
+    *p++ = (uint8_t)(0x80 | (size_len - 1));
+    for (size_t i = size_len - 2; i < size_len - 1; --i)
+        *p++ = (uint8_t)(body_size >> (8 * i));
+
+    return 0;
 }
 
 int ptls_buffer_push_asn1_ubigint(ptls_buffer_t *buf, const void *bignum, size_t size)

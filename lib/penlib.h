@@ -1,9 +1,9 @@
 /*
- * penlib.h  —  PENQUIC ポータブル標準ライブラリ抽象化レイヤ
+ * penlib.h  —  MQTT-TLS ポータブル標準ライブラリ抽象化レイヤ
  *
  * 目的:
  *   Windows / Linux / macOS / IoT(組み込み) など様々な環境で動作する
- *   PENQUIC プロジェクト全体の標準ライブラリ・OS API 呼び出しを
+ *   MQTT-TLS プロジェクト全体の標準ライブラリ・OS API 呼び出しを
  *   このヘッダ一本に集約し、移植時の差し替えコストを最小化する。
  *
  *   各ソースファイルは <string.h> / <stdlib.h> / <stdio.h> 等を直接
@@ -345,7 +345,7 @@ void   pen_aligned_free (void* ptr);
 /* =====================================================================
  * ファイル I/O ラッパー
  *
- * picoquic/loglib のログ・設定ファイル読み書きに使用。
+ * ログ・設定ファイル読み書きに使用。
  * 組み込み環境でファイルシステムが存在しない場合は
  * NULL を返す / 何もしない実装に差し替えること。
  * FILE* 型は penlib.h 上部の <stdio.h> include で提供済み。
@@ -438,7 +438,7 @@ char* pen_get_timestamp(char* buf, size_t buf_size);
  *   引数:
  *     stream   : 出力先 FILE* (stdout / stderr)
  *                カスタムバックエンド時は無視される。
- *     protocol : プロトコル名文字列 ("PENQUIC" / "MQTT" 等)
+ *     protocol : プロトコル名文字列 ("MQTT" 等 等)
  *     state    : 状態文字列        ("OK" / "WARN" / "ERROR" / "DEBUG")
  *     action   : 動作文字列        ("connect" / "disconnect" /
  *                                   "send" / "recv" / "change" 等)
@@ -483,7 +483,7 @@ void   pen_free   (void* ptr);
  *   コンパイル時に PENLIB_NO_STDIO を定義して no-op にする。
  *
  * pen_vfprintf:
- *   va_list 版 fprintf。picoquic の内部ログ関数 (debug_printf 等) が使用。
+ *   va_list 版 fprintf。内部ログ関数が使用。
  *   MSVC では vfprintf_s に委譲し、POSIX では vfprintf に委譲する。
  *   組み込み環境では pen_fprintf と同様に差し替えること。
  *
@@ -544,21 +544,21 @@ void pen_exit (int status);
 /* =====================================================================
  * タイムゾーン
  *
- * PENQUIC のログ・チケット時刻は内部的にすべて UTC で扱う。
+ * ログ・チケット時刻は内部的にすべて UTC で扱う。
  * pen_get_utc_offset_sec() はローカル時刻への表示変換にのみ使用する。
  *
  * デフォルト: 日本標準時 JST (UTC+9 = +32400 秒)
  *
  * ビルド時オーバーライド:
- *   cmake .. -DPENQUIC_UTC_OFFSET_SEC=0       # UTC
- *   cmake .. -DPENQUIC_UTC_OFFSET_SEC=3600    # CET  (UTC+1)
- *   cmake .. -DPENQUIC_UTC_OFFSET_SEC=-18000  # EST  (UTC-5)
- *   cmake .. -DPENQUIC_UTC_OFFSET_SEC=28800   # CST  (UTC+8)
- *   cmake .. -DPENQUIC_UTC_OFFSET_SEC=32400   # JST  (UTC+9, デフォルト)
- *   cmake .. -DPENQUIC_UTC_OFFSET_SEC=36000   # AEST (UTC+10)
+ *   cmake .. -DMQTT_UTC_OFFSET_SEC=0       # UTC
+ *   cmake .. -DMQTT_UTC_OFFSET_SEC=3600    # CET  (UTC+1)
+ *   cmake .. -DMQTT_UTC_OFFSET_SEC=-18000  # EST  (UTC-5)
+ *   cmake .. -DMQTT_UTC_OFFSET_SEC=28800   # CST  (UTC+8)
+ *   cmake .. -DMQTT_UTC_OFFSET_SEC=32400   # JST  (UTC+9, デフォルト)
+ *   cmake .. -DMQTT_UTC_OFFSET_SEC=36000   # AEST (UTC+10)
  *
  * 実行時オーバーライド (OS のタイムゾーン設定を使用する場合):
- *   cmake .. -DPENQUIC_TZ_FROM_OS=ON
+ *   cmake .. -DMQTT_TZ_FROM_OS=ON
  *   → pen_get_utc_offset_sec() が localtime() で OS 設定を読む。
  *     組み込み環境など OS TZ が使えない場合は OFF のままにすること。
  *
