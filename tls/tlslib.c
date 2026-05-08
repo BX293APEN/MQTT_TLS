@@ -344,6 +344,9 @@ static void tls_ctx_init(tls_session_t *sess, int verify_cert, int debug)
     /* 乱数生成 */
     sess->ctx.random_bytes = ptls_minicrypto_random_bytes;
 
+    /* 時刻取得 (必須: new_instance 内で get_time != NULL を pen_assert で検査する) */
+    sess->ctx.get_time = &ptls_get_time;
+
     /* 証明書検証: verify_cert=0 のときスキップ (IoT 向け簡易設定) */
     if (!verify_cert) {
         sess->ctx.verify_certificate = NULL;
@@ -623,11 +626,10 @@ int tls_recv(
 
         ptls_buffer_dispose(&plainbuf);
 
-        if (ret == 0) {
-            result = 1; /* データなし・エラーなし → タイムアウト扱い */
-            goto cleanup;
-        }
-        /* ret == PTLS_ERROR_IN_PROGRESS: さらに受信が必要 → ループ継続 */
+        /* ret == 0 かつ off == 0: TLS レコード層の制御メッセージ (KeyUpdate 等) を処理した
+         * だけでアプリデータが無い状態。IN_PROGRESS と同様にループを継続する。
+         * タイムアウトは次回の tcp_recv_some で発動する。
+         * ret == PTLS_ERROR_IN_PROGRESS も同様にループ継続。 */
     }
 
 cleanup:
