@@ -82,9 +82,8 @@ int main(int argc, char **argv)
         if (msg) {
             pen_log(
                 stdout, "MQTT/TLS", "INFO", "recv",
-                "%s : %.*s\n",
+                "%s : %s\n",
                 msg->topic,
-                (int)msg->payload_len,
                 msg->payload ? (char *)msg->payload : ""
             );
             mqtt_message_free(msg);

@@ -636,10 +636,12 @@ int mqtt_subscriber(
                 break;
             }
             if (msg) {
-                pen_printf("%s : %.*s\n",
-                           msg->topic,
-                           (int)msg->payload_len,
-                           msg->payload ? (char *)msg->payload : "");
+                pen_log(
+                    stdout, "MQTT/TLS", "INFO", "recv",
+                    "%s : %s\n",
+                    msg->topic,
+                    msg->payload ? (char *)msg->payload : ""
+                );
                 mqtt_message_free(msg);
             }
         }
