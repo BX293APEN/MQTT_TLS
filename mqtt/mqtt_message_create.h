@@ -16,7 +16,7 @@
 #ifndef MQTT_MESSAGE_CREATE_H
 #define MQTT_MESSAGE_CREATE_H
 
-/* すべての標準型・OS API は mqttlib.h 経由で提供する */
+/* すべての標準型・OS API は penlib.h 経由で提供する */
 #include <penlib.h>
 
 #ifdef __cplusplus

@@ -30,10 +30,8 @@ int main(int argc, char **argv)
 #endif
 
     if (argc < 3) {
-        pen_fprintf(stderr,
-            "Usage:\n"
-            "  %s pub <topic> <message> [client_id]\n"
-            "  %s sub <topic> [client_id]\n",
+        pen_log(stderr, "MQTT", "ERROR", "main",
+            "Usage:\n  %s pub <topic> <message> [client_id]\n  %s sub <topic> [client_id]\n",
             argv[0], argv[0]);
         return 1;
     }
@@ -72,8 +70,8 @@ int main(int argc, char **argv)
         sub_opts.verify_cert = 0;  /* 本番では 1 に変更すること */
         sub_opts.sni         = NULL;
 
-        pen_fprintf(stderr,
-            "[main] sub server=%s:%d topic=%s loop=%d\n",
+        pen_log(stderr, "MQTT", "OK", "main",
+            "sub server=%s:%d topic=%s loop=%d\n",
             host, port, topic, loop);
 
         mqtt_message_t *msg = NULL;
@@ -88,8 +86,8 @@ int main(int argc, char **argv)
         }
 
     } else {
-        pen_fprintf(stderr,
-            "[main] Unknown mode: \"%s\". Use \"pub\" or \"sub\".\n", mode);
+        pen_log(stderr, "MQTT", "ERROR", "main",
+            "Unknown mode: \"%s\". Use \"pub\" or \"sub\".\n", mode);
         ret = 1;
     }
 

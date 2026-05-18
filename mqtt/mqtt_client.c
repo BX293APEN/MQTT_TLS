@@ -45,21 +45,20 @@
 /* ==========================================================================
  * ログマクロ
  *
- * [FIX] MQTT_LOG_INFO / MQTT_LOG_ERR をカンマ演算子から do { } while(0) に変更。
- *   旧実装はカンマ演算子で2つの pen_fprintf を連結していたため、
- *   if (cond) MQTT_LOG_INFO(...); else ... のような文脈で else が
- *   2番目の pen_fprintf に対応してしまう潜在的バグがあった。
+ * pen_log(stream, protocol, state, action, fmt, ...) を使用して
+ * "[MQTT] [state] [action] yyyy/mm/dd hh:mm:ss 詳細情報" 形式で出力する。
+ *
+ * MQTT_LOG_INFO  : state="OK"    — 正常動作の情報ログ
+ * MQTT_LOG_ERR   : state="ERROR" — エラーログ
+ * MQTT_LOG_DBG   : state="DEBUG" — デバッグログ (debug フラグが真の時のみ)
  * ========================================================================== */
 
 #define MQTT_LOG_INFO(tag, ...) \
-    do { pen_fprintf(stderr, "[mqtt/%s] ", tag); \
-         pen_fprintf(stderr, __VA_ARGS__); } while(0)
+    do { pen_log(stderr, "MQTT", "OK",    tag, __VA_ARGS__); } while(0)
 #define MQTT_LOG_ERR(tag, ...) \
-    do { pen_fprintf(stderr, "[mqtt/%s][ERR] ", tag); \
-         pen_fprintf(stderr, __VA_ARGS__); } while(0)
+    do { pen_log(stderr, "MQTT", "ERROR", tag, __VA_ARGS__); } while(0)
 #define MQTT_LOG_DBG(tag, debug, ...) \
-    do { if (debug) { pen_fprintf(stderr, "[mqtt/%s][DBG] ", tag); \
-                      pen_fprintf(stderr, __VA_ARGS__); } } while(0)
+    do { if (debug) { pen_log(stderr, "MQTT", "DEBUG", tag, __VA_ARGS__); } } while(0)
 
 /* ==========================================================================
  * 内部ヘルパー: Variable Byte Integer デコード

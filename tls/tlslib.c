@@ -47,12 +47,21 @@
 
 /* ==========================================================================
  * ログマクロ
+ *
+ * pen_log(stream, protocol, state, action, fmt, ...) を使用して
+ * "[TLS] [state] [action] yyyy/mm/dd hh:mm:ss 詳細情報" 形式で出力する。
+ *
+ * TLS_LOG_INFO  : state="OK"    — 正常動作の情報ログ
+ * TLS_LOG_ERR   : state="ERROR" — エラーログ
+ * TLS_LOG_DBG   : state="DEBUG" — デバッグログ (debug フラグが真の時のみ)
  * ========================================================================== */
 
-#define TLS_LOG_INFO(...)  pen_fprintf(stderr, "[tls/info] " __VA_ARGS__)
-#define TLS_LOG_ERR(...)   pen_fprintf(stderr, "[tls/err ] " __VA_ARGS__)
-#define TLS_LOG_DBG(debug, ...) \
-    do { if (debug) { pen_fprintf(stderr, "[tls/dbg ] " __VA_ARGS__); } } while(0)
+#define TLS_LOG_INFO(action, ...)  \
+    do { pen_log(stderr, "TLS", "OK",    action, __VA_ARGS__); } while(0)
+#define TLS_LOG_ERR(action, ...)   \
+    do { pen_log(stderr, "TLS", "ERROR", action, __VA_ARGS__); } while(0)
+#define TLS_LOG_DBG(debug, action, ...) \
+    do { if (debug) { pen_log(stderr, "TLS", "DEBUG", action, __VA_ARGS__); } } while(0)
 
 /* ==========================================================================
  * 内部: 受信平文リングバッファ
@@ -374,7 +383,7 @@ static int tls_handshake_step(tls_session_t *session,
     /* [FIX] hs_buf をヒープ確保: スタック消費を回避 */
     uint8_t *hs_buf = (uint8_t *)pen_malloc(TLS_HANDSHAKE_BUF_SIZE);
     if (!hs_buf) {
-        TLS_LOG_ERR("handshake: malloc failed for hs_buf\n");
+        TLS_LOG_ERR("handshake", "handshake: malloc failed for hs_buf\n");
         return PTLS_ERROR_NO_MEMORY;
     }
 
@@ -386,11 +395,11 @@ static int tls_handshake_step(tls_session_t *session,
 
     if (sendbuf.off > 0) {
         int send_ret = tcp_send_all(sock, sendbuf.base, sendbuf.off);
-        TLS_LOG_DBG(debug, "handshake sent %zu bytes\n", sendbuf.off);
+        TLS_LOG_DBG(debug, "handshake", "handshake sent %zu bytes\n", sendbuf.off);
         ptls_buffer_dispose(&sendbuf);
         pen_free(hs_buf);
         if (send_ret != 0) {
-            TLS_LOG_ERR("handshake send failed\n");
+            TLS_LOG_ERR("handshake", "handshake send failed\n");
             return PTLS_ERROR_NO_MEMORY;
         }
     } else {
@@ -423,10 +432,10 @@ int tls_connect(
     /* --- TCP 接続 --- */
     tls_socket_t sock = tcp_connect(host, port, timeout_ms);
     if (sock == TLS_INVALID_SOCKET) {
-        TLS_LOG_ERR("TCP connect failed: %s:%d\n", host, port);
+        TLS_LOG_ERR("connect", "TCP connect failed: %s:%d\n", host, port);
         return -1;
     }
-    TLS_LOG_DBG(resolved.debug, "TCP connected: %s:%d\n", host, port);
+    TLS_LOG_DBG(resolved.debug, "connect", "TCP connected: %s:%d\n", host, port);
 
     /* --- picotls コンテキスト初期化 --- */
     tls_ctx_init(session, resolved.verify_cert, resolved.debug);
@@ -434,7 +443,7 @@ int tls_connect(
     /* --- TLS ハンドル生成 --- */
     session->tls = ptls_client_new(&session->ctx);
     if (!session->tls) {
-        TLS_LOG_ERR("ptls_client_new failed\n");
+        TLS_LOG_ERR("connect", "ptls_client_new failed\n");
         sock_close(sock);
         return -1;
     }
@@ -442,7 +451,7 @@ int tls_connect(
     /* SNI 設定 */
     const char *sni_name = sni ? sni : host;
     if (ptls_set_server_name(session->tls, sni_name, pen_strlen(sni_name)) != 0) {
-        TLS_LOG_ERR("ptls_set_server_name failed\n");
+        TLS_LOG_ERR("connect", "ptls_set_server_name failed\n");
         ptls_free(session->tls);
         session->tls = NULL;
         sock_close(sock);
@@ -466,7 +475,7 @@ int tls_connect(
         alpn_proto.len  = pen_strlen(resolved.alpn);
         props.client.negotiated_protocols.list  = &alpn_proto;
         props.client.negotiated_protocols.count = 1;
-        TLS_LOG_DBG(resolved.debug, "ALPN: \"%s\"\n", resolved.alpn);
+        TLS_LOG_DBG(resolved.debug, "connect", "ALPN: \"%s\"\n", resolved.alpn);
     }
 
     /* --- TLS ハンドシェイク ---
@@ -474,7 +483,7 @@ int tls_connect(
      */
     uint8_t *raw_in = (uint8_t *)pen_malloc(TLS_RAW_BUF_SIZE);
     if (!raw_in) {
-        TLS_LOG_ERR("malloc failed for raw_in\n");
+        TLS_LOG_ERR("alloc", "malloc failed for raw_in\n");
         tls_close(session);
         return -1;
     }
@@ -487,7 +496,7 @@ int tls_connect(
         size_t nread = 0;
         int r = tcp_recv_some(sock, raw_in, TLS_RAW_BUF_SIZE, &nread, timeout_ms);
         if (r != 0) {
-            TLS_LOG_ERR("handshake recv failed (r=%d)\n", r);
+            TLS_LOG_ERR("handshake", "handshake recv failed (r=%d)\n", r);
             pen_free(raw_in);
             tls_close(session);
             return -1;
@@ -499,12 +508,12 @@ int tls_connect(
     pen_free(raw_in);
 
     if (ret != 0) {
-        TLS_LOG_ERR("ptls_handshake error: %d\n", ret);
+        TLS_LOG_ERR("handshake", "ptls_handshake error: %d\n", ret);
         tls_close(session);
         return -1;
     }
 
-    TLS_LOG_INFO("TLS handshake complete: %s:%d\n", host, port);
+    TLS_LOG_INFO("handshake", "TLS handshake complete: %s:%d\n", host, port);
     return 0;
 }
 
@@ -524,7 +533,7 @@ int tls_send(tls_session_t *session, const uint8_t *buf, size_t len)
     /* [FIX] enc_buf をヒープ確保 */
     uint8_t *enc_buf = (uint8_t *)pen_malloc(TLS_SEND_BUF_SIZE);
     if (!enc_buf) {
-        TLS_LOG_ERR("tls_send: malloc failed\n");
+        TLS_LOG_ERR("send", "tls_send: malloc failed\n");
         return -1;
     }
 
@@ -533,7 +542,7 @@ int tls_send(tls_session_t *session, const uint8_t *buf, size_t len)
 
     int ret = ptls_send(session->tls, &sendbuf, buf, len);
     if (ret != 0) {
-        TLS_LOG_ERR("ptls_send error: %d\n", ret);
+        TLS_LOG_ERR("send", "ptls_send error: %d\n", ret);
         ptls_buffer_dispose(&sendbuf);
         pen_free(enc_buf);
         return -1;
@@ -544,7 +553,7 @@ int tls_send(tls_session_t *session, const uint8_t *buf, size_t len)
     pen_free(enc_buf);
 
     if (r != 0) {
-        TLS_LOG_ERR("TCP send failed after ptls_send\n");
+        TLS_LOG_ERR("send", "TCP send failed after ptls_send\n");
         return -1;
     }
     return 0;
@@ -583,7 +592,7 @@ int tls_recv(
     uint8_t *raw        = (uint8_t *)pen_malloc(TLS_RAW_BUF_SIZE);
     uint8_t *plain_heap = (uint8_t *)pen_malloc(TLS_PLAIN_BUF_SIZE);
     if (!raw || !plain_heap) {
-        TLS_LOG_ERR("tls_recv: malloc failed\n");
+        TLS_LOG_ERR("recv", "tls_recv: malloc failed\n");
         pen_free(raw);
         pen_free(plain_heap);
         return -1;
@@ -605,7 +614,7 @@ int tls_recv(
         int ret = ptls_receive(session->tls, &plainbuf, raw, &consumed);
 
         if (ret != 0 && ret != PTLS_ERROR_IN_PROGRESS) {
-            TLS_LOG_ERR("ptls_receive error: %d\n", ret);
+            TLS_LOG_ERR("recv", "ptls_receive error: %d\n", ret);
             ptls_buffer_dispose(&plainbuf);
             result = -1;
             goto cleanup;
@@ -690,7 +699,7 @@ void tls_close(tls_session_t *session)
 
     rbuf_reset(&g_rbuf);
 
-    TLS_LOG_INFO("TLS connection closed.\n");
+    TLS_LOG_INFO("close", "TLS connection closed.\n");
 }
 
 /* ==========================================================================

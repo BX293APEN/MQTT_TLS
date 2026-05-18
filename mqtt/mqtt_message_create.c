@@ -265,10 +265,19 @@ void mqtt_packet_dump(const mqtt_packet_t *pkt, const char *label)
 {
     if (!pkt) return;
     const char *lbl = label ? label : "MQTT";
-    pen_fprintf(stderr, "[%s] len=%zu bytes:", lbl, pkt->length);
+
+    /* ダンプ文字列を一時バッファに組み立ててから pen_log で出力する */
+    char hexbuf[256];
+    size_t pos = 0;
     for (size_t i = 0; i < pkt->length && i < 64; i++) {
-        pen_fprintf(stderr, " %02X", pkt->data[i]);
+        pos += (size_t)pen_snprintf(hexbuf + pos, sizeof(hexbuf) - pos,
+                                    " %02X", pkt->data[i]);
+        if (pos >= sizeof(hexbuf) - 4) break;
     }
-    if (pkt->length > 64) pen_fprintf(stderr, " ...");
-    pen_fprintf(stderr, "\n");
+    if (pkt->length > 64 && pos < sizeof(hexbuf) - 4) {
+        pen_snprintf(hexbuf + pos, sizeof(hexbuf) - pos, " ...");
+    }
+
+    pen_log(stderr, "MQTT", "DEBUG", lbl, "len=%zu bytes:%s\n",
+            pkt->length, hexbuf);
 }
