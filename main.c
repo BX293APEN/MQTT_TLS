@@ -70,24 +70,33 @@ int main(int argc, char **argv)
         sub_opts.verify_cert = 0;  /* 本番では 1 に変更すること */
         sub_opts.sni         = NULL;
 
-        pen_log(stderr, "MQTT", "OK", "main",
+        pen_log(
+            stdout, "MQTT/TLS", "OK", "main",
             "sub server=%s:%d topic=%s loop=%d\n",
-            host, port, topic, loop);
+            host, port, topic, loop
+        );
 
         mqtt_message_t *msg = NULL;
         ret = mqtt_subscriber(host, port, debug, loop, &sub_opts, &msg);
 
         if (msg) {
-            pen_printf("%s : %.*s\n",
-                       msg->topic,
-                       (int)msg->payload_len,
-                       msg->payload ? (char *)msg->payload : "");
+            pen_log(
+                stdout, "MQTT/TLS", "INFO", "recv",
+                "%s : %.*s\n",
+                msg->topic,
+                (int)msg->payload_len,
+                msg->payload ? (char *)msg->payload : ""
+            );
             mqtt_message_free(msg);
         }
 
-    } else {
-        pen_log(stderr, "MQTT", "ERROR", "main",
-            "Unknown mode: \"%s\". Use \"pub\" or \"sub\".\n", mode);
+    } 
+    else {
+        pen_log(
+            stderr, 
+            "MQTT", "ERROR", "main",
+            "Unknown mode: \"%s\". Use \"pub\" or \"sub\".\n", mode
+        );
         ret = 1;
     }
 
